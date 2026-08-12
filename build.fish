@@ -3,9 +3,10 @@
 set -l src_dir (dirname (realpath (status filename)))
 set -l app ~/Applications/ProfilePilot.app
 
-mkdir -p $app/Contents/MacOS
+mkdir -p $app/Contents/MacOS $app/Contents/Resources
 swiftc -O -o $app/Contents/MacOS/ProfilePilot $src_dir/main.swift; or exit 1
 cp $src_dir/Info.plist $app/Contents/Info.plist
+cp $src_dir/Resources/AppIcon.icns $app/Contents/Resources/AppIcon.icns
 codesign --force --sign - $app; or exit 1
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f $app
 
