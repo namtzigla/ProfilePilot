@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""ProfilePilot for Linux: pick a browser/profile for every link you open.
+
+Registers as the default browser (see install.fish) and shows a GTK picker
+for each URL, then hands the URL to the chosen browser/profile. Shares its
+config format with the macOS app: ~/.config/profilepilot/config.json
+
+Config entry keys (all optional except "app"):
+  app         executable name ("google-chrome-stable", "firefox") or full path
+  name        display name in the picker
+  profiles    enumerate profiles (default: true for known Chromium/Firefox)
+  localState  override path to a Chromium "Local State" file
+  profilesIni override path to a Firefox "profiles.ini" file
+  args        extra command-line arguments
+  enabled     false hides the browser without deleting the entry
+  default     true marks the default browser (sorts first, Enter opens it)
+"""
+
+import configparser
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gdk, Gtk, Pango  # noqa: E402
+
+CHROMIUM_CONFIG_DIRS = {
+    "google-chrome": "google-chrome",
+    "google-chrome-stable": "google-chrome",
+    "google-chrome-beta": "google-chrome-beta",
+    "google-chrome-unstable": "google-chrome-unstable",
+    "chromium": "chromium",
+    "chromium-browser": "chromium",
+    "brave": "BraveSoftware/Brave-Browser",
+    "brave-browser": "BraveSoftware/Brave-Browser",
+    "microsoft-edge": "microsoft-edge",
+    "microsoft-edge-stable": "microsoft-edge",
+    "vivaldi": "vivaldi",
+    "vivaldi-stable": "vivaldi",
+}
+
+# Firefox-family: profiles.ini directory relative to $HOME.
+FIREFOX_INI_DIRS = {
+    "firefox": ".mozilla/firefox",
+    "firefox-developer-edition": ".mozilla/firefox",
+    "firefox-nightly": ".mozilla/firefox",
+    "librewolf": ".librewolf",
+    "waterfox": ".waterfox",
+    "zen-browser": ".zen",
+    "zen": ".zen",
+}
+
+SHORT_NAMES = {
+    "google-chrome": "Chrome",
+    "google-chrome-stable": "Chrome",
+    "google-chrome-beta": "Chrome Beta",
+    "chromium": "Chromium",
+    "chromium-browser": "Chromium",
+    "brave": "Brave",
+    "brave-browser": "Brave",
+    "microsoft-edge": "Edge",
+    "microsoft-edge-stable": "Edge",
+    "vivaldi-stable": "Vivaldi",
+    "firefox": "Firefox",
+    "zen-browser": "Zen",
+}
+
+KNOWN_EXECUTABLES = [
+    "google-chrome-stable", "google-chrome", "chromium", "chromium-browser",
+    "brave", "brave-browser", "microsoft-edge-stable", "vivaldi-stable",
+    "firefox", "firefox-developer-edition", "librewolf", "waterfox",
+    "zen-browser", "epiphany", "falkon", "qutebrowser", "opera",
+]
+
+DEFAULT_CONFIG = {"browsers": [{"name": "Chrome", "app": "google-chrome-stable"},
+                               {"app": "firefox"}]}
+
+
+def config_path():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "profilepilot", "config.json")
+
+
+def last_choice_path():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "profilepilot", "last-choice")
+
+
+def starter_entries():
+    entries, seen = [], set()
+    for exe in KNOWN_EXECUTABLES:
+        path = shutil.which(exe)
+        if not path:
+            continue
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        entry = {"app": exe}
+        if exe in SHORT_NAMES:
+            entry["name"] = SHORT_NAMES[exe]
+        entries.append(entry)
+    return entries or DEFAULT_CONFIG["browsers"]
+
+
+def load_config():
+    """Returns (config, error). No config file -> auto-detected browsers."""
+    try:
+        with open(config_path()) as f:
+            return json.load(f), None
+    except FileNotFoundError:
+        return {"browsers": starter_entries()}, None
+    except Exception as exc:  # malformed JSON etc.
+        return {"browsers": starter_entries()}, str(exc)
+
+
+def resolve_app(app):
+    if app.startswith(("/", "~")):
+        path = os.path.expanduser(app)
+        return path if os.access(path, os.X_OK) else None
+    return shutil.which(app)
+
+
+def base_name(app):
+    return os.path.basename(app)
+
+
+def load_chromium_profiles(local_state):
+    """[(directory, name)] with the last-used profile first."""
+    try:
+        with open(local_state) as f:
+            data = json.load(f)
+        cache = data["profile"]["info_cache"]
+    except Exception:
+        return []
+    last_used = data.get("profile", {}).get("last_used", "")
+    profiles = [(directory, meta.get("name", directory)) for directory, meta in cache.items()]
+    profiles.sort(key=lambda p: (p[0] != last_used, p[1].lower()))
+    return profiles
+
+
+def load_firefox_profiles(profiles_ini):
+    """[(name, launch_args)]. Classic profiles use -P <name>; the newer
+    profile manager (StoreID= in profiles.ini) keeps user-visible names in
+    Profile Groups/<storeid>.sqlite and uses --profile <path>."""
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str
+    if not parser.read(profiles_ini):
+        return []
+    base_dir = os.path.dirname(profiles_ini)
+    ini_profiles, store_ids, install_default = [], [], None
+    for section in parser.sections():
+        values = parser[section]
+        if section.startswith("Install"):
+            install_default = values.get("Default", install_default)
+        elif section.startswith("Profile"):
+            if "Name" in values:
+                ini_profiles.append((values["Name"], values.get("Path", ""),
+                                     values.get("Default") == "1"))
+            store_id = values.get("StoreID")
+            if store_id and store_id not in store_ids:
+                store_ids.append(store_id)
+
+    for store_id in store_ids:
+        db_path = os.path.join(base_dir, "Profile Groups", f"{store_id}.sqlite")
+        stored = load_firefox_profile_group(db_path, base_dir, install_default)
+        if stored:
+            return stored
+
+    ini_profiles.sort(key=lambda p: (not (p[1] == install_default or p[2]), p[0].lower()))
+    return [(name, ["-P", name]) for name, _path, _default in ini_profiles]
+
+
+def load_firefox_profile_group(db_path, base_dir, default_path):
+    try:
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = connection.execute("SELECT name, path FROM Profiles ORDER BY id").fetchall()
+        connection.close()
+    except sqlite3.Error:
+        return []
+    rows = [(name, path) for name, path in rows if name]
+    rows.sort(key=lambda r: r[1] != default_path)
+    return [(name, ["--profile", path if path.startswith("/") else os.path.join(base_dir, path)])
+            for name, path in rows]
+
+
+def targets_for(entry):
+    """A list of {title, exe, args} for one config entry."""
+    exe = resolve_app(entry["app"])
+    if not exe:
+        return []
+    base = base_name(entry["app"])
+    display = entry.get("name") or SHORT_NAMES.get(base, base)
+    extra = entry.get("args", [])
+    home = os.path.expanduser("~")
+    state_path = entry.get("localState")
+    if state_path:
+        state_path = os.path.expanduser(state_path)
+    elif base in CHROMIUM_CONFIG_DIRS:
+        state_path = os.path.join(home, ".config", CHROMIUM_CONFIG_DIRS[base], "Local State")
+    ini_path = entry.get("profilesIni")
+    if ini_path:
+        ini_path = os.path.expanduser(ini_path)
+    elif base in FIREFOX_INI_DIRS:
+        ini_path = os.path.join(home, FIREFOX_INI_DIRS[base], "profiles.ini")
+    want_profiles = entry.get("profiles", state_path is not None or ini_path is not None)
+
+    if want_profiles and state_path:
+        profiles = load_chromium_profiles(state_path)
+        if len(profiles) > 1:
+            return [{"title": f"{display} — {name}", "exe": exe,
+                     "args": [f"--profile-directory={directory}"] + extra}
+                    for directory, name in profiles]
+    if want_profiles and ini_path:
+        profiles = load_firefox_profiles(ini_path)
+        if len(profiles) > 1:
+            return [{"title": f"{display} — {name}", "exe": exe, "args": launch + extra}
+                    for name, launch in profiles]
+    return [{"title": display, "exe": exe, "args": extra}]
+
+
+def build_targets(config):
+    default_group, rest = [], []
+    for entry in config.get("browsers", []):
+        if entry.get("enabled") is False:
+            continue
+        group = targets_for(entry)
+        if entry.get("default") is True and not default_group:
+            default_group = group
+        else:
+            rest.extend(group)
+    return default_group + rest
+
+
+def has_default_browser(config):
+    return any(entry.get("default") is True and entry.get("enabled") is not False
+               and resolve_app(entry["app"])
+               for entry in config.get("browsers", []))
+
+
+def promote_last_choice(targets):
+    try:
+        with open(last_choice_path()) as f:
+            last = f.read().strip()
+    except OSError:
+        return targets
+    for index, target in enumerate(targets):
+        if target["title"] == last and index > 0:
+            return [target] + targets[:index] + targets[index + 1:]
+    return targets
+
+
+def save_last_choice(title):
+    path = last_choice_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(title)
+
+
+def open_target(target, url):
+    subprocess.Popen([target["exe"]] + target["args"] + [url],
+                     start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def copy_to_clipboard(text):
+    for command in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "-ib"]):
+        if shutil.which(command[0]):
+            subprocess.run(command, input=text.encode(), check=False)
+            return
+    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+    clipboard.set_text(text, -1)
+    clipboard.store()
+
+
+class Picker(Gtk.Window):
+    """Vertical list of targets; Enter opens the first, 2-9 jump, Esc cancels."""
+
+    def __init__(self, url, targets):
+        super().__init__(title="ProfilePilot")
+        self.choice = None  # int index, "copy", or None
+        self.set_resizable(False)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_keep_above(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+        self.connect("delete-event", lambda *_: Gtk.main_quit())
+        self.connect("key-press-event", self.on_key, len(targets))
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_property("margin", 16)
+
+        title = Gtk.Label(xalign=0)
+        title.set_markup("<b>Open link with</b>")
+        box.pack_start(title, False, False, 0)
+
+        url_label = Gtk.Label(label=url, xalign=0)
+        url_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        url_label.set_max_width_chars(48)
+        url_label.get_style_context().add_class("dim-label")
+        box.pack_start(url_label, False, False, 6)
+
+        for index, target in enumerate(targets):
+            button = Gtk.Button(label=target["title"])
+            button.get_child().set_xalign(0)
+            button.connect("clicked", self.on_choose, index)
+            box.pack_start(button, False, False, 0)
+            if index == 0:
+                button.grab_focus()
+
+        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        copy_button = Gtk.Button(label="Copy Link")
+        copy_button.connect("clicked", self.on_copy)
+        cancel_button = Gtk.Button(label="Cancel")
+        cancel_button.connect("clicked", lambda *_: Gtk.main_quit())
+        bottom.pack_start(copy_button, False, False, 0)
+        bottom.pack_end(cancel_button, False, False, 0)
+        box.pack_start(bottom, False, False, 8)
+
+        self.add(box)
+
+    def on_choose(self, _button, index):
+        self.choice = index
+        Gtk.main_quit()
+
+    def on_copy(self, _button):
+        self.choice = "copy"
+        Gtk.main_quit()
+
+    def on_key(self, _widget, event, count):
+        if event.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+            return True
+        digit = event.keyval - Gdk.KEY_1
+        if 0 <= digit < min(count, 9):
+            self.choice = digit
+            Gtk.main_quit()
+            return True
+        return False
+
+
+def error_dialog(message, detail):
+    dialog = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING,
+                               buttons=Gtk.ButtonsType.OK, text=message)
+    dialog.format_secondary_text(detail)
+    dialog.run()
+    dialog.destroy()
+
+
+def route(url, targets):
+    if len(targets) == 1:
+        open_target(targets[0], url)
+        return
+    picker = Picker(url, targets)
+    picker.show_all()
+    Gtk.main()
+    picker.destroy()
+    if picker.choice == "copy":
+        copy_to_clipboard(url)
+    elif isinstance(picker.choice, int):
+        save_last_choice(targets[picker.choice]["title"])
+        open_target(targets[picker.choice], url)
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a]
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if args and args[0] == "--register":
+        subprocess.run(["xdg-settings", "set", "default-web-browser", "profilepilot.desktop"],
+                       check=False)
+        return 0
+    if not args:
+        config, _ = load_config()
+        print(f"config: {config_path()}")
+        for target in build_targets(config):
+            print(f"  {target['title']}: {target['exe']} {' '.join(target['args'])}")
+        print("usage: profilepilot <url>   (or --register to become the default browser)")
+        return 0
+
+    config, error = load_config()
+    if error:
+        error_dialog("ProfilePilot config error",
+                     f"{config_path()}\n\n{error}\n\nUsing auto-detected browsers.")
+    targets = build_targets(config)
+    if not targets:
+        error_dialog("No browsers found",
+                     f"None of the browsers in {config_path()} are installed.")
+        return 1
+    if not has_default_browser(config):
+        targets = promote_last_choice(targets)
+    for url in args:
+        route(url, targets)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

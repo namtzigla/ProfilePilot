@@ -1,0 +1,21 @@
+name: ProfilePilot
+options:
+  createIntermediateGroups: true
+targets:
+  ProfilePilot:
+    type: application
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: ProfilePilot
+      - path: Resources/AppIcon.icns
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.namtzigla.profilepilot
+        INFOPLIST_FILE: ProfilePilot/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        SWIFT_VERSION: "5.7"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: "NO"

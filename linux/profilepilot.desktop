@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=ProfilePilot
+Comment=Route links to the right browser profile
+Exec=profilepilot %u
+Terminal=false
+Type=Application
+Icon=profilepilot
+Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;
+StartupNotify=false
