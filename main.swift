@@ -15,6 +15,25 @@ struct BrowserEntry: Codable {
     var localState: String?  // override path to the Chromium "Local State" file
     var profilesIni: String? // override path to the Firefox "profiles.ini" file
     var args: [String]?      // extra command-line args passed to the browser
+    var enabled: Bool?       // false hides the browser from the picker without deleting it
+    var isDefault: Bool?     // the default browser: its entries sort first, Return opens it
+
+    enum CodingKeys: String, CodingKey {
+        case name, app, profiles, localState, profilesIni, args, enabled
+        case isDefault = "default"
+    }
+
+    init(name: String? = nil, app: String, profiles: Bool? = nil, localState: String? = nil,
+         profilesIni: String? = nil, args: [String]? = nil, enabled: Bool? = nil, isDefault: Bool? = nil) {
+        self.name = name
+        self.app = app
+        self.profiles = profiles
+        self.localState = localState
+        self.profilesIni = profilesIni
+        self.args = args
+        self.enabled = enabled
+        self.isDefault = isDefault
+    }
 }
 
 struct Config: Codable {
@@ -22,8 +41,7 @@ struct Config: Codable {
 }
 
 let defaultConfig = Config(browsers: [
-    BrowserEntry(name: "Chrome", app: "Google Chrome", profiles: true,
-                 localState: nil, profilesIni: nil, args: nil),
+    BrowserEntry(name: "Chrome", app: "Google Chrome", profiles: true),
 ])
 
 func configFileURL() -> URL {
@@ -199,8 +217,7 @@ func canonicalApp(forPath path: String) -> String {
 func starterEntries() -> [BrowserEntry] {
     let entries = installedBrowsers().map { url -> BrowserEntry in
         let app = canonicalApp(forPath: url.path)
-        return BrowserEntry(name: shortBrowserNames[appBaseName(app)], app: app,
-                            profiles: nil, localState: nil, profilesIni: nil, args: nil)
+        return BrowserEntry(name: shortBrowserNames[appBaseName(app)], app: app)
     }
     return entries.isEmpty ? defaultConfig.browsers : entries
 }
@@ -213,46 +230,61 @@ struct Target {
     let extraArgs: [String]
 }
 
-func buildTargets(_ config: Config) -> [Target] {
-    var targets: [Target] = []
-    for entry in config.browsers {
-        guard let appPath = resolveAppPath(entry.app) else { continue }  // not installed
-        let base = appBaseName(entry.app)
-        let display = entry.name ?? shortBrowserNames[base] ?? base
-        let extraArgs = entry.args ?? []
-        let supportDir = NSHomeDirectory() + "/Library/Application Support/"
-        let statePath = entry.localState.map { NSString(string: $0).expandingTildeInPath }
-            ?? chromiumStateDirs[base].map { supportDir + $0 + "/Local State" }
-        let iniPath = entry.profilesIni.map { NSString(string: $0).expandingTildeInPath }
-            ?? firefoxIniDirs[base].map { supportDir + $0 + "/profiles.ini" }
-        let wantProfiles = entry.profiles ?? (statePath != nil || iniPath != nil)
+func targets(for entry: BrowserEntry) -> [Target] {
+    guard let appPath = resolveAppPath(entry.app) else { return [] }  // not installed
+    let base = appBaseName(entry.app)
+    let display = entry.name ?? shortBrowserNames[base] ?? base
+    let extraArgs = entry.args ?? []
+    let supportDir = NSHomeDirectory() + "/Library/Application Support/"
+    let statePath = entry.localState.map { NSString(string: $0).expandingTildeInPath }
+        ?? chromiumStateDirs[base].map { supportDir + $0 + "/Local State" }
+    let iniPath = entry.profilesIni.map { NSString(string: $0).expandingTildeInPath }
+        ?? firefoxIniDirs[base].map { supportDir + $0 + "/profiles.ini" }
+    let wantProfiles = entry.profiles ?? (statePath != nil || iniPath != nil)
 
-        if wantProfiles, let statePath {
-            let profiles = loadProfiles(localState: statePath)
-            if profiles.count > 1 {
-                for profile in profiles {
-                    targets.append(Target(title: "\(display) — \(profile.name)", appPath: appPath,
-                                          profileDirectory: profile.directory, firefoxProfile: nil,
-                                          extraArgs: extraArgs))
-                }
-                continue
+    if wantProfiles, let statePath {
+        let profiles = loadProfiles(localState: statePath)
+        if profiles.count > 1 {
+            return profiles.map { profile in
+                Target(title: "\(display) — \(profile.name)", appPath: appPath,
+                       profileDirectory: profile.directory, firefoxProfile: nil, extraArgs: extraArgs)
             }
         }
-        if wantProfiles, let iniPath {
-            let profiles = loadFirefoxProfiles(profilesIni: iniPath)
-            if profiles.count > 1 {
-                for profile in profiles {
-                    targets.append(Target(title: "\(display) — \(profile)", appPath: appPath,
-                                          profileDirectory: nil, firefoxProfile: profile,
-                                          extraArgs: extraArgs))
-                }
-                continue
-            }
-        }
-        targets.append(Target(title: display, appPath: appPath,
-                              profileDirectory: nil, firefoxProfile: nil, extraArgs: extraArgs))
     }
-    return targets
+    if wantProfiles, let iniPath {
+        let profiles = loadFirefoxProfiles(profilesIni: iniPath)
+        if profiles.count > 1 {
+            return profiles.map { profile in
+                Target(title: "\(display) — \(profile)", appPath: appPath,
+                       profileDirectory: nil, firefoxProfile: profile, extraArgs: extraArgs)
+            }
+        }
+    }
+    return [Target(title: display, appPath: appPath,
+                   profileDirectory: nil, firefoxProfile: nil, extraArgs: extraArgs)]
+}
+
+// The default browser's targets sort first; within a browser, profile order
+// is last-used/default first, so Return always opens the default browser in
+// its most recent profile.
+func buildTargets(_ config: Config) -> [Target] {
+    var defaultGroup: [Target] = []
+    var rest: [Target] = []
+    for entry in config.browsers where entry.enabled != false {
+        let group = targets(for: entry)
+        if entry.isDefault == true, defaultGroup.isEmpty {
+            defaultGroup = group
+        } else {
+            rest += group
+        }
+    }
+    return defaultGroup + rest
+}
+
+func hasDefaultBrowser(_ config: Config) -> Bool {
+    config.browsers.contains {
+        $0.isDefault == true && $0.enabled != false && resolveAppPath($0.app) != nil
+    }
 }
 
 func openTarget(_ target: Target, url: URL) {
@@ -453,9 +485,11 @@ final class SettingsController: NSObject, NSTableViewDataSource, NSTableViewDele
         let browsersLabel = NSTextField(labelWithString: "Browsers shown in the picker")
         browsersLabel.font = .boldSystemFont(ofSize: 12)
 
-        for (identifier, columnTitle, width) in [("browser", "Browser", 230.0),
-                                                 ("name", "Display Name", 180.0),
-                                                 ("profiles", "Profiles", 60.0)] {
+        for (identifier, columnTitle, width) in [("enabled", "On", 30.0),
+                                                 ("browser", "Browser", 185.0),
+                                                 ("name", "Display Name", 145.0),
+                                                 ("default", "Default", 55.0),
+                                                 ("profiles", "Profiles", 55.0)] {
             let column = NSTableColumn(identifier: .init(identifier))
             column.title = columnTitle
             column.width = width
@@ -496,7 +530,7 @@ final class SettingsController: NSObject, NSTableViewDataSource, NSTableViewDele
         listButtons.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
 
         let hint = NSTextField(labelWithString:
-            "Chromium and Firefox browsers expand into one picker entry per profile. Safari has no public profile API, so it appears as a single entry. Advanced options (extra args, custom profile paths) live in the JSON.")
+            "On shows or hides a browser without deleting it. Default sorts that browser first so Return opens it; with no default, the picker remembers your last pick. Chromium and Firefox browsers expand into one entry per profile (Safari has no public profile API). Extra args and custom profile paths live in the JSON.")
         hint.font = .systemFont(ofSize: 10)
         hint.textColor = .secondaryLabelColor
         hint.lineBreakMode = .byWordWrapping
@@ -563,17 +597,25 @@ final class SettingsController: NSObject, NSTableViewDataSource, NSTableViewDele
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let entry = entries[row]
         switch tableColumn?.identifier.rawValue {
+        case "enabled":
+            let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleEnabled(_:)))
+            checkbox.state = entry.enabled != false ? .on : .off
+            checkbox.toolTip = "Show this browser in the picker"
+            return checkbox
         case "browser":
             let cell = NSTableCellView()
             let label = NSTextField(labelWithString: appBaseName(entry.app))
             let imageView = NSImageView()
-            if let path = resolveAppPath(entry.app) {
+            if resolveAppPath(entry.app) == nil {
+                label.textColor = .disabledControlTextColor
+                label.toolTip = "Not installed — skipped in the picker"
+            } else if let path = resolveAppPath(entry.app) {
                 let icon = NSWorkspace.shared.icon(forFile: path)
                 icon.size = NSSize(width: 18, height: 18)
                 imageView.image = icon
-            } else {
-                label.textColor = .disabledControlTextColor
-                label.toolTip = "Not installed — skipped in the picker"
+                if entry.enabled == false {
+                    label.textColor = .disabledControlTextColor
+                }
             }
             let cellStack = NSStackView(views: [imageView, label])
             cellStack.orientation = .horizontal
@@ -595,6 +637,11 @@ final class SettingsController: NSObject, NSTableViewDataSource, NSTableViewDele
             field.lineBreakMode = .byTruncatingTail
             field.delegate = self
             return field
+        case "default":
+            let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleDefault(_:)))
+            checkbox.state = entry.isDefault == true ? .on : .off
+            checkbox.toolTip = "Default browser: sorts first in the picker so Return opens it. Uncheck to fall back to remembering your last pick."
+            return checkbox
         case "profiles":
             let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleProfiles(_:)))
             let capable = isProfileCapable(entry)
@@ -624,6 +671,28 @@ final class SettingsController: NSObject, NSTableViewDataSource, NSTableViewDele
         let row = tableView.row(for: sender)
         guard row >= 0, row < entries.count else { return }
         entries[row].profiles = sender.state == .on
+    }
+
+    @objc private func toggleEnabled(_ sender: NSButton) {
+        let row = tableView.row(for: sender)
+        guard row >= 0, row < entries.count else { return }
+        entries[row].enabled = sender.state == .on ? nil : false
+        reload(selecting: tableView.selectedRow)
+    }
+
+    // Behaves like a radio group, except unchecking the current default is
+    // allowed (no default → the picker remembers the last choice instead).
+    @objc private func toggleDefault(_ sender: NSButton) {
+        let row = tableView.row(for: sender)
+        guard row >= 0, row < entries.count else { return }
+        let makeDefault = sender.state == .on
+        for index in entries.indices {
+            entries[index].isDefault = nil
+        }
+        if makeDefault {
+            entries[row].isDefault = true
+        }
+        reload(selecting: tableView.selectedRow)
     }
 
     // MARK: List actions
@@ -673,8 +742,7 @@ final class SettingsController: NSObject, NSTableViewDataSource, NSTableViewDele
 
     private func appendEntry(forPath path: String) {
         let app = canonicalApp(forPath: path)
-        entries.append(BrowserEntry(name: shortBrowserNames[appBaseName(app)], app: app,
-                                    profiles: nil, localState: nil, profilesIni: nil, args: nil))
+        entries.append(BrowserEntry(name: shortBrowserNames[appBaseName(app)], app: app))
         reload(selecting: entries.count - 1)
     }
 
@@ -756,7 +824,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.informativeText = "\(configFileURL().path)\n\n\(error)\n\nFalling back to Chrome profiles."
             alert.runModal()
         }
-        let targets = promoteLastChoice(buildTargets(config))
+        // An explicit default browser owns the top spot; otherwise the last
+        // picked target is promoted so Return repeats it.
+        var targets = buildTargets(config)
+        if !hasDefaultBrowser(config) {
+            targets = promoteLastChoice(targets)
+        }
         for url in urls {
             route(url, targets: targets)
         }

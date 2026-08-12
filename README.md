@@ -19,8 +19,13 @@ shows the picker, hands the URL off, and quits.
     `-P <name>`. The default profile sorts first.
   - Safari appears as a single entry: Apple exposes no CLI, URL scheme, or
     AppleScript hook for opening a URL in a specific Safari profile.
-- **Keyboard-first picker.** `Return` opens the entry you picked last time
-  (it's promoted to the top), `2`–`9` jump to the others, `Esc` cancels.
+- **Enable/disable and a default browser.** Each entry can be switched off
+  without deleting it, and one browser can be marked as the default: its
+  entries sort first in the picker so `Return` opens it (in its most recent
+  profile).
+- **Keyboard-first picker.** `Return` opens the top entry — the default
+  browser if one is set, otherwise the entry you picked last time — and
+  `2`–`9` jump to the others, `Esc` cancels.
 - **Copy Link** button for when you don't want to open the URL at all.
 - If only one target exists, the picker is skipped and the URL opens directly.
 
@@ -38,8 +43,10 @@ open ~/Applications/ProfilePilot.app
 
 Launching the app by hand (no URL) opens the **Settings** window:
 
-- A table of your browsers: icon, editable display name, and a per-browser
-  **Profiles** checkbox (enabled for Chromium/Firefox browsers).
+- A table of your browsers: an **On** checkbox (show/hide in the picker
+  without deleting), icon, editable display name, a **Default** checkbox
+  (single-select — the default browser sorts first so `Return` opens it), and
+  a per-browser **Profiles** checkbox (enabled for Chromium/Firefox browsers).
 - **+** adds a browser from a menu of every app on your machine registered as
   an http handler (or **Other…** to pick any `.app`); **−** removes; the
   arrows reorder the picker.
@@ -56,11 +63,11 @@ Settings window reads and writes this same file:
 ```json
 {
   "browsers": [
-    { "name": "Chrome", "app": "Google Chrome" },
+    { "name": "Chrome", "app": "Google Chrome", "default": true },
     { "app": "Firefox" },
     { "app": "Safari" },
     { "name": "Work", "app": "Microsoft Edge", "profiles": false },
-    { "app": "/Applications/Arc.app" }
+    { "app": "/Applications/Arc.app", "enabled": false }
   ]
 }
 ```
@@ -75,9 +82,13 @@ Each entry supports:
 | `localState`  | Override the path to a Chromium `Local State` file.                        |
 | `profilesIni` | Override the path to a Firefox `profiles.ini` file.                        |
 | `args`        | Extra command-line arguments passed to the browser.                        |
+| `enabled`     | `false` hides the browser from the picker without deleting the entry.      |
+| `default`     | `true` marks the default browser (at most one entry).                      |
 
-Picker order follows config order, except the entry you chose last time moves
-to the top (so `Return` repeats it). Profiles sort last-used/default first.
+Picker order follows config order, with two exceptions: the default browser's
+entries always sort first, and when no default is set the entry you chose last
+time moves to the top (so `Return` repeats it). Profiles sort
+last-used/default first.
 
 ## Icon
 
