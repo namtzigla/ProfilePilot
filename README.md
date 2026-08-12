@@ -9,15 +9,19 @@ shows the picker, hands the URL off, and quits.
 
 ## Features
 
-- **Any browser, not just Chrome.** Define the browsers you use in a small
-  JSON config; anything missing from the machine is silently skipped.
-- **Chromium profile awareness.** Chrome, Brave, Edge, Chromium, and Vivaldi
-  get one picker entry per profile, read from their `Local State` file.
+- **Any browser, not just Chrome.** Manage the list in a graphical Settings
+  window or in a small JSON config; anything not installed is silently skipped.
+- **Profile awareness.**
+  - Chromium browsers (Chrome, Brave, Edge, Chromium, Vivaldi) get one picker
+    entry per profile, read from their `Local State` file.
+  - Firefox-family browsers (Firefox, Dev Edition, Nightly, Zen, LibreWolf,
+    Waterfox) get one entry per profile from `profiles.ini`, launched with
+    `-P <name>`. The default profile sorts first.
+  - Safari appears as a single entry: Apple exposes no CLI, URL scheme, or
+    AppleScript hook for opening a URL in a specific Safari profile.
 - **Keyboard-first picker.** `Return` opens the entry you picked last time
   (it's promoted to the top), `2`–`9` jump to the others, `Esc` cancels.
 - **Copy Link** button for when you don't want to open the URL at all.
-- **Zero-friction fallback.** With no config file it behaves like a Chrome
-  profile picker, exactly as before.
 - If only one target exists, the picker is skipped and the URL opens directly.
 
 ## Install
@@ -30,20 +34,31 @@ Requires macOS 12+ and Xcode command line tools (`swiftc`), plus
 open ~/Applications/ProfilePilot.app
 ```
 
-On a manual launch it offers **Set as Default** (register as default browser)
-and **Open Config** (creates a starter config listing the browsers found on
-your machine, then opens it in your editor).
+## Settings
 
-## Configuration
+Launching the app by hand (no URL) opens the **Settings** window:
 
-`~/.config/profilepilot/config.json` (honors `XDG_CONFIG_HOME`):
+- A table of your browsers: icon, editable display name, and a per-browser
+  **Profiles** checkbox (enabled for Chromium/Firefox browsers).
+- **+** adds a browser from a menu of every app on your machine registered as
+  an http handler (or **Other…** to pick any `.app`); **−** removes; the
+  arrows reorder the picker.
+- **Set as Default Browser** registers ProfilePilot as the system default.
+- **Save** writes the JSON config; **Edit JSON…** opens it in your editor for
+  the advanced options below.
+- On first run the table is pre-seeded with every browser found on the machine.
+
+## Configuration file
+
+`~/.config/profilepilot/config.json` (honors `XDG_CONFIG_HOME`) — the
+Settings window reads and writes this same file:
 
 ```json
 {
   "browsers": [
     { "name": "Chrome", "app": "Google Chrome" },
-    { "app": "Safari" },
     { "app": "Firefox" },
+    { "app": "Safari" },
     { "name": "Work", "app": "Microsoft Edge", "profiles": false },
     { "app": "/Applications/Arc.app" }
   ]
@@ -52,16 +67,17 @@ your machine, then opens it in your editor).
 
 Each entry supports:
 
-| key          | meaning                                                                  |
-| ------------ | ------------------------------------------------------------------------ |
-| `app`        | App name (`"Safari"`, `"Google Chrome"`) or a full `.app` path. Required. |
-| `name`       | Display name in the picker. Defaults to the app's (shortened) name.       |
-| `profiles`   | Enumerate Chromium profiles. Defaults to `true` for known Chromium apps.  |
-| `localState` | Override the path to a Chromium `Local State` file.                       |
-| `args`       | Extra command-line arguments passed to the browser.                       |
+| key           | meaning                                                                   |
+| ------------- | ------------------------------------------------------------------------- |
+| `app`         | App name (`"Safari"`, `"Google Chrome"`) or a full `.app` path. Required.  |
+| `name`        | Display name in the picker. Defaults to the app's (shortened) name.        |
+| `profiles`    | Enumerate profiles. Defaults to `true` for known Chromium/Firefox apps.    |
+| `localState`  | Override the path to a Chromium `Local State` file.                        |
+| `profilesIni` | Override the path to a Firefox `profiles.ini` file.                        |
+| `args`        | Extra command-line arguments passed to the browser.                        |
 
 Picker order follows config order, except the entry you chose last time moves
-to the top (so `Return` repeats it). Chromium profiles sort last-used first.
+to the top (so `Return` repeats it). Profiles sort last-used/default first.
 
 ## Icon
 
@@ -76,5 +92,6 @@ iconutil -c icns -o Resources/AppIcon.icns /tmp/AppIcon.iconset
 
 - Rules: route URLs to a target automatically by domain/pattern, only ask
   when no rule matches.
-- Firefox containers and Safari profiles as first-class targets.
+- Firefox containers as first-class targets (needs the Open external links in
+  a container extension).
 - Non-browser targets (e.g. open Figma/Zoom/Linear links in their apps).
