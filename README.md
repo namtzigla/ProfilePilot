@@ -15,10 +15,21 @@ shows the picker, hands the URL off, and quits.
   - Chromium browsers (Chrome, Brave, Edge, Chromium, Vivaldi) get one picker
     entry per profile, read from their `Local State` file.
   - Firefox-family browsers (Firefox, Dev Edition, Nightly, Zen, LibreWolf,
-    Waterfox) get one entry per profile from `profiles.ini`, launched with
-    `-P <name>`. The default profile sorts first.
-  - Safari appears as a single entry: Apple exposes no CLI, URL scheme, or
-    AppleScript hook for opening a URL in a specific Safari profile.
+    Waterfox) get one entry per profile. Classic profiles come from
+    `profiles.ini` (launched with `-P <name>`); with Firefox's newer profile
+    manager (`StoreID=` in `profiles.ini`) the user-visible names are read
+    from `Profile Groups/<storeid>.sqlite` and launched with
+    `--profile <path>`. The last-used/default profile sorts first.
+  - Safari profiles are enumerated from `SafariTabs.db` (each profile row's
+    title; the default profile is "Personal"). Apple provides no launch API,
+    so opening clicks Safari's `File → New <Profile> Window` menu item via
+    System Events and then sets the new window's URL. This needs two
+    permissions on first use: **Automation** (macOS prompts automatically)
+    and **Accessibility** (ProfilePilot triggers the prompt; grant in System
+    Settings → Privacy & Security → Accessibility). Reading the profile list
+    also needs access to Safari's data (macOS may prompt, or grant Full Disk
+    Access). Without these, Safari falls back to a single picker entry /
+    last-used profile.
 - **Enable/disable and a default browser.** Each entry can be switched off
   without deleting it, and one browser can be marked as the default: its
   entries sort first in the picker so `Return` opens it (in its most recent
@@ -98,6 +109,14 @@ last-used/default first.
 swift icon/generate.swift /tmp/AppIcon.iconset
 iconutil -c icns -o Resources/AppIcon.icns /tmp/AppIcon.iconset
 ```
+
+## Caveats
+
+- Safari profile opening is menu-name based (`New <Profile> Window`), so it
+  assumes an English UI language.
+- Firefox: if a different profile is already running, Firefox's remoting
+  usually forwards the URL; some setups may show a "Firefox is already
+  running" complaint.
 
 ## Roadmap
 

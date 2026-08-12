@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import SQLite3
 import UniformTypeIdentifiers
 
 // ProfilePilot: registers as the default browser and routes every URL handed
@@ -123,17 +125,28 @@ func loadProfiles(localState: String) -> [ChromeProfile] {
         }
 }
 
-// Firefox profile names from profiles.ini, default profile first. The
-// default is the profile an [Install*] section points at (or Default=1).
-func loadFirefoxProfiles(profilesIni: String) -> [String] {
+// Firefox profiles come in two flavors. Classic profiles are fully described
+// by profiles.ini (Name=, launched with -P <name>). The newer profile
+// manager (StoreID= in profiles.ini) keeps the user-visible names in
+// Profile Groups/<storeid>.sqlite — the profiles.ini names go stale — and
+// those are launched with --profile <absolute path>. The last-used/default
+// profile (the [Install*] section's Default= path) sorts first.
+struct FirefoxProfile {
+    let name: String
+    let launchArgs: [String]
+}
+
+func loadFirefoxProfiles(profilesIni: String) -> [FirefoxProfile] {
     guard let text = try? String(contentsOfFile: profilesIni, encoding: .utf8) else { return [] }
-    var profiles: [(name: String, path: String, isDefault: Bool)] = []
+    let baseDir = (profilesIni as NSString).deletingLastPathComponent
+    var iniProfiles: [(name: String, path: String, isDefault: Bool)] = []
     var installDefaultPath: String?
+    var storeIDs: [String] = []
     var section = ""
     var current: (name: String?, path: String?, isDefault: Bool) = (nil, nil, false)
     func flush() {
         if section.hasPrefix("Profile"), let name = current.name {
-            profiles.append((name, current.path ?? "", current.isDefault))
+            iniProfiles.append((name, current.path ?? "", current.isDefault))
         }
         current = (nil, nil, false)
     }
@@ -150,6 +163,7 @@ func loadFirefoxProfiles(profilesIni: String) -> [String] {
                 case "Name": current.name = value
                 case "Path": current.path = value
                 case "Default": current.isDefault = value == "1"
+                case "StoreID": if !storeIDs.contains(value) { storeIDs.append(value) }
                 default: break
                 }
             } else if section.hasPrefix("Install"), key == "Default" {
@@ -158,14 +172,78 @@ func loadFirefoxProfiles(profilesIni: String) -> [String] {
         }
     }
     flush()
-    return profiles
+
+    for storeID in storeIDs {
+        let stored = loadFirefoxProfileGroup(
+            dbPath: baseDir + "/Profile Groups/\(storeID).sqlite",
+            baseDir: baseDir, defaultPath: installDefaultPath)
+        if !stored.isEmpty { return stored }
+    }
+
+    return iniProfiles
         .sorted { a, b in
             let aDefault = a.path == installDefaultPath || a.isDefault
             let bDefault = b.path == installDefaultPath || b.isDefault
             if aDefault != bDefault { return aDefault }
             return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
         }
-        .map { $0.name }
+        .map { FirefoxProfile(name: $0.name, launchArgs: ["-P", $0.name]) }
+}
+
+func loadFirefoxProfileGroup(dbPath: String, baseDir: String, defaultPath: String?) -> [FirefoxProfile] {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        sqlite3_close(db)
+        return []
+    }
+    defer { sqlite3_close(db) }
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "SELECT name, path FROM Profiles ORDER BY id;",
+                             -1, &statement, nil) == SQLITE_OK else { return [] }
+    defer { sqlite3_finalize(statement) }
+    var profiles: [(name: String, path: String)] = []
+    while sqlite3_step(statement) == SQLITE_ROW {
+        let name = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
+        let path = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
+        if !name.isEmpty { profiles.append((name, path)) }
+    }
+    let defaults = profiles.filter { $0.path == defaultPath }
+    let others = profiles.filter { $0.path != defaultPath }
+    return (defaults + others).map { profile in
+        let absolute = profile.path.hasPrefix("/") ? profile.path : baseDir + "/" + profile.path
+        return FirefoxProfile(name: profile.name, launchArgs: ["--profile", absolute])
+    }
+}
+
+// Safari profiles from SafariTabs.db: each profile is a bookmarks row with
+// type=1, subtype=2; the default profile has an empty title and is shown as
+// "Personal" in Safari's UI. Reading the db needs access to Safari's
+// container (macOS prompts, or grant Full Disk Access); an unreadable db
+// just means Safari stays a single picker entry.
+struct SafariProfile {
+    let name: String
+    let uuid: String
+}
+
+func loadSafariProfiles() -> [SafariProfile] {
+    let path = NSHomeDirectory() + "/Library/Containers/com.apple.Safari/Data/Library/Safari/SafariTabs.db"
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        sqlite3_close(db)
+        return []
+    }
+    defer { sqlite3_close(db) }
+    var statement: OpaquePointer?
+    let sql = "SELECT title, external_uuid FROM bookmarks WHERE type = 1 AND subtype = 2 ORDER BY id;"
+    guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+    defer { sqlite3_finalize(statement) }
+    var profiles: [SafariProfile] = []
+    while sqlite3_step(statement) == SQLITE_ROW {
+        let title = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
+        let uuid = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
+        profiles.append(SafariProfile(name: title.isEmpty ? "Personal" : title, uuid: uuid))
+    }
+    return profiles
 }
 
 func resolveAppPath(_ app: String) -> String? {
@@ -190,6 +268,7 @@ func isProfileCapable(_ entry: BrowserEntry) -> Bool {
     let base = appBaseName(entry.app)
     return entry.localState != nil || entry.profilesIni != nil
         || chromiumStateDirs[base] != nil || firefoxIniDirs[base] != nil
+        || base == "Safari"
 }
 
 func isDefaultBrowser() -> Bool {
@@ -225,8 +304,9 @@ func starterEntries() -> [BrowserEntry] {
 struct Target {
     let title: String
     let appPath: String
-    let profileDirectory: String?  // Chromium --profile-directory value
-    let firefoxProfile: String?    // Firefox -P profile name
+    let profileDirectory: String?     // Chromium --profile-directory value
+    let firefoxArgs: [String]?        // Firefox -P <name> or --profile <path>
+    var safariProfile: String? = nil  // Safari profile name (opened via menu scripting)
     let extraArgs: [String]
 }
 
@@ -240,14 +320,25 @@ func targets(for entry: BrowserEntry) -> [Target] {
         ?? chromiumStateDirs[base].map { supportDir + $0 + "/Local State" }
     let iniPath = entry.profilesIni.map { NSString(string: $0).expandingTildeInPath }
         ?? firefoxIniDirs[base].map { supportDir + $0 + "/profiles.ini" }
-    let wantProfiles = entry.profiles ?? (statePath != nil || iniPath != nil)
+    let isSafari = base == "Safari"
+    let wantProfiles = entry.profiles ?? (statePath != nil || iniPath != nil || isSafari)
 
+    if wantProfiles, isSafari {
+        let profiles = loadSafariProfiles()
+        if profiles.count > 1 {
+            return profiles.map { profile in
+                Target(title: "\(display) — \(profile.name)", appPath: appPath,
+                       profileDirectory: nil, firefoxArgs: nil,
+                       safariProfile: profile.name, extraArgs: extraArgs)
+            }
+        }
+    }
     if wantProfiles, let statePath {
         let profiles = loadProfiles(localState: statePath)
         if profiles.count > 1 {
             return profiles.map { profile in
                 Target(title: "\(display) — \(profile.name)", appPath: appPath,
-                       profileDirectory: profile.directory, firefoxProfile: nil, extraArgs: extraArgs)
+                       profileDirectory: profile.directory, firefoxArgs: nil, extraArgs: extraArgs)
             }
         }
     }
@@ -255,13 +346,13 @@ func targets(for entry: BrowserEntry) -> [Target] {
         let profiles = loadFirefoxProfiles(profilesIni: iniPath)
         if profiles.count > 1 {
             return profiles.map { profile in
-                Target(title: "\(display) — \(profile)", appPath: appPath,
-                       profileDirectory: nil, firefoxProfile: profile, extraArgs: extraArgs)
+                Target(title: "\(display) — \(profile.name)", appPath: appPath,
+                       profileDirectory: nil, firefoxArgs: profile.launchArgs, extraArgs: extraArgs)
             }
         }
     }
     return [Target(title: display, appPath: appPath,
-                   profileDirectory: nil, firefoxProfile: nil, extraArgs: extraArgs)]
+                   profileDirectory: nil, firefoxArgs: nil, extraArgs: extraArgs)]
 }
 
 // The default browser's targets sort first; within a browser, profile order
@@ -288,23 +379,92 @@ func hasDefaultBrowser(_ config: Config) -> Bool {
 }
 
 func openTarget(_ target: Target, url: URL) {
+    if let profile = target.safariProfile {
+        openInSafariProfile(profile, appPath: target.appPath, url: url)
+        return
+    }
     // `open -n` spawns a fresh browser process; the browser's own remoting
     // (Chromium singleton lock, Firefox remote service) forwards the profile
     // flag and URL to the running instance.
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    if target.profileDirectory != nil || target.firefoxProfile != nil || !target.extraArgs.isEmpty {
+    if target.profileDirectory != nil || target.firefoxArgs != nil || !target.extraArgs.isEmpty {
         var args = ["-na", target.appPath, "--args"]
         if let dir = target.profileDirectory { args.append("--profile-directory=\(dir)") }
-        if let profile = target.firefoxProfile { args += ["-P", profile] }
+        if let firefoxArgs = target.firefoxArgs { args += firefoxArgs }
         args += target.extraArgs
         args.append(url.absoluteString)
-        task.arguments = args
+        runOpen(args)
     } else {
-        task.arguments = ["-a", target.appPath, url.absoluteString]
+        runOpen(["-a", target.appPath, url.absoluteString])
     }
+}
+
+func runOpen(_ arguments: [String]) {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    task.arguments = arguments
     try? task.run()
     task.waitUntilExit()
+}
+
+// MARK: - Safari profile launching
+
+func appleScriptString(_ value: String) -> String {
+    "\"" + value
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
+
+// Safari has no CLI or scripting interface for profiles, so the profile
+// window is opened by clicking Safari's File > "New <Profile> Window" menu
+// item via System Events (this needs Accessibility + Automation permission),
+// then pointing the new front window at the URL.
+func openInSafariProfile(_ profileName: String, appPath: String, url: URL) {
+    guard AXIsProcessTrusted() else {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        AXIsProcessTrustedWithOptions(options)
+        let alert = NSAlert()
+        alert.messageText = "Accessibility permission needed"
+        alert.informativeText = """
+        Opening a specific Safari profile works by clicking Safari's File menu, \
+        which needs Accessibility access.
+
+        Grant it to ProfilePilot in System Settings → Privacy & Security → \
+        Accessibility, then click your link again. Opening Safari's last-used \
+        profile for now.
+        """
+        alert.runModal()
+        runOpen(["-a", appPath, url.absoluteString])
+        return
+    }
+    let script = """
+    tell application "Safari" to activate
+    tell application "System Events"
+        repeat 25 times
+            try
+                click menu item \(appleScriptString("New \(profileName) Window")) of menu "File" of menu bar item "File" of menu bar 1 of process "Safari"
+                exit repeat
+            on error
+                delay 0.3
+            end try
+        end repeat
+    end tell
+    delay 0.3
+    tell application "Safari"
+        repeat 25 times
+            try
+                set URL of current tab of front window to \(appleScriptString(url.absoluteString))
+                exit repeat
+            on error
+                delay 0.3
+            end try
+        end repeat
+    end tell
+    """
+    var error: NSDictionary?
+    NSAppleScript(source: script)?.executeAndReturnError(&error)
+    if error != nil {
+        runOpen(["-a", appPath, url.absoluteString])
+    }
 }
 
 // The target picked last time is promoted to the top so Return repeats it.
@@ -530,7 +690,7 @@ final class SettingsController: NSObject, NSTableViewDataSource, NSTableViewDele
         listButtons.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
 
         let hint = NSTextField(labelWithString:
-            "On shows or hides a browser without deleting it. Default sorts that browser first so Return opens it; with no default, the picker remembers your last pick. Chromium and Firefox browsers expand into one entry per profile (Safari has no public profile API). Extra args and custom profile paths live in the JSON.")
+            "On shows or hides a browser without deleting it. Default sorts that browser first so Return opens it; with no default, the picker remembers your last pick. Chromium, Firefox, and Safari expand into one entry per profile — Safari needs Accessibility permission (asked on first use) and access to Safari data. Extra args and custom profile paths live in the JSON.")
         hint.font = .systemFont(ofSize: 10)
         hint.textColor = .secondaryLabelColor
         hint.lineBreakMode = .byWordWrapping
