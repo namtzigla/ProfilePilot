@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """ProfilePilot for Linux: pick a browser/profile for every link you open.
 
-Registers as the default browser (see install.fish) and shows a GTK picker
-for each URL, then hands the URL to the chosen browser/profile. Shares its
-config format with the macOS app: ~/.config/profilepilot/config.json
+Registers as the default browser (see install.fish) and shows a picker for
+each URL, then hands the URL to the chosen browser/profile. Shares its config
+format with the macOS app: ~/.config/profilepilot/config.json
+
+The picker draws itself with whichever toolkit the machine has — GTK 3, GTK 4
+or Qt (PyQt6/PySide6/PyQt5) — so there is nothing to install on most desktops.
+With none of them, links still open in the top target, just without a picker.
 
 Usage: profilepilot [browser flags] [url ...]
   with no url, opens a new window in the chosen browser; flags such as
   --incognito are forwarded to it unchanged.
   --list       print the resolved picker entries and exit
   --register   register as the default browser and exit
+  --toolkit T  force a UI toolkit: gtk3, gtk4 or qt (also $PROFILEPILOT_TOOLKIT,
+               which accepts a comma-separated preference order)
   --generate-config [--force]
                scan for installed browsers and profiles and write them to
                the config file (--force overwrites an existing one)
@@ -26,20 +32,14 @@ Config entry keys (all optional except "app"):
 """
 
 import configparser
+import importlib
+import importlib.util
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
-
-import gi
-
-gi.require_version("Gtk", "3.0")
-# Pin Gdk too: on systems with GTK 4 installed alongside GTK 3, importing Gdk
-# unversioned resolves to 4.0 and then conflicts with Gtk 3.0's own Gdk 3.0.
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk, Pango  # noqa: E402
 
 CHROMIUM_CONFIG_DIRS = {
     "google-chrome": "google-chrome",
@@ -289,27 +289,111 @@ def open_target(target, url, flags=()):
 
 
 def copy_to_clipboard(text):
+    """External helpers first: they own the selection after we exit, which the
+    in-process clipboards can only promise on GTK 3."""
     for command in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "-ib"]):
         if shutil.which(command[0]):
             subprocess.run(command, input=text.encode(), check=False)
             return
-    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-    clipboard.set_text(text, -1)
-    clipboard.store()
+    toolkit = load_toolkit()
+    if toolkit:
+        toolkit.copy_text(text)
 
 
-class Picker(Gtk.Window):
-    """Vertical list of targets; Enter opens the first, 2-9 jump, Esc cancels."""
+# --- UI toolkits ------------------------------------------------------------
+#
+# The picker is drawn by whichever toolkit is installed. Each class below
+# implements the same three calls and imports its toolkit in __init__, so
+# nothing is loaded until a window is actually needed:
+#   pick(url, targets) -> int index | "copy" | None
+#   error(message, detail)
+#   copy_text(text)
 
-    def __init__(self, url, targets):
-        super().__init__(title="ProfilePilot")
-        self.choice = None  # int index, "copy", or None
-        self.set_resizable(False)
-        self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_keep_above(True)
-        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
-        self.connect("delete-event", lambda *_: Gtk.main_quit())
-        self.connect("key-press-event", self.on_key, len(targets))
+TOOLKIT_HINT = ("Install PyGObject with GTK (Arch: python-gobject gtk4, "
+                "Debian/Ubuntu: python3-gi gir1.2-gtk-4.0, Fedora: python3-gobject gtk4) "
+                "or Qt for Python (Arch: python-pyqt6, Debian/Ubuntu: python3-pyqt6, "
+                "or: pip install PySide6).")
+
+QT_BINDINGS = ("PyQt6", "PySide6", "PyQt5")
+
+
+class Choice:
+    """Mutable picker result shared with the toolkit's callbacks."""
+
+    def __init__(self):
+        self.value = None  # int index, "copy", or None
+
+
+def gi_versions(namespace):
+    """Versions of a GIR namespace that are installed, without importing it —
+    Gtk 3.0 and 4.0 cannot both be required in one process."""
+    try:
+        import gi
+    except ImportError:
+        return []
+    repository = getattr(gi, "Repository", None)
+    if repository is None:  # PyGObject < 3.52
+        try:
+            gi.require_version("GIRepository", "2.0")
+            from gi.repository import GIRepository
+            repository = GIRepository.Repository
+        except Exception:
+            return []
+    try:
+        return list(repository.get_default().enumerate_versions(namespace))
+    except Exception:
+        return []
+
+
+def middle_ellipsize(text, limit=48):
+    if len(text) <= limit:
+        return text
+    head = (limit - 1) // 2
+    return text[:head] + "…" + text[head + 1 - limit:]
+
+
+class Gtk3Toolkit:
+    name = "gtk3"
+
+    @staticmethod
+    def available():
+        return "3.0" in gi_versions("Gtk")
+
+    def __init__(self):
+        import gi
+        gi.require_version("Gtk", "3.0")
+        # Pin Gdk too: on systems with GTK 4 installed alongside GTK 3,
+        # importing Gdk unversioned resolves to 4.0 and then conflicts with
+        # Gtk 3.0's own Gdk 3.0.
+        gi.require_version("Gdk", "3.0")
+        from gi.repository import Gdk, Gtk, Pango
+        self.Gdk, self.Gtk, self.Pango = Gdk, Gtk, Pango
+
+    def pick(self, url, targets):
+        Gdk, Gtk, Pango = self.Gdk, self.Gtk, self.Pango
+        choice = Choice()
+
+        def finish(value):
+            choice.value = value
+            Gtk.main_quit()
+
+        def on_key(_widget, event):
+            if event.keyval == Gdk.KEY_Escape:
+                Gtk.main_quit()
+                return True
+            index = event.keyval - Gdk.KEY_1
+            if 0 <= index < min(len(targets), 9):
+                finish(index)
+                return True
+            return False
+
+        window = Gtk.Window(title="ProfilePilot")
+        window.set_resizable(False)
+        window.set_position(Gtk.WindowPosition.CENTER)
+        window.set_keep_above(True)
+        window.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+        window.connect("delete-event", lambda *_: Gtk.main_quit())
+        window.connect("key-press-event", on_key)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_property("margin", 16)
@@ -328,7 +412,7 @@ class Picker(Gtk.Window):
         for index, target in enumerate(targets):
             button = Gtk.Button(label=target["title"])
             button.get_child().set_xalign(0)
-            button.connect("clicked", self.on_choose, index)
+            button.connect("clicked", lambda _b, i=index: finish(i))
             box.pack_start(button, False, False, 0)
             if index == 0:
                 button.grab_focus()
@@ -338,54 +422,323 @@ class Picker(Gtk.Window):
         cancel_button.connect("clicked", lambda *_: Gtk.main_quit())
         if url:
             copy_button = Gtk.Button(label="Copy Link")
-            copy_button.connect("clicked", self.on_copy)
+            copy_button.connect("clicked", lambda *_: finish("copy"))
             bottom.pack_start(copy_button, False, False, 0)
         bottom.pack_end(cancel_button, False, False, 0)
         box.pack_start(bottom, False, False, 8)
 
-        self.add(box)
+        window.add(box)
+        window.show_all()
+        Gtk.main()
+        window.destroy()
+        return choice.value
 
-    def on_choose(self, _button, index):
-        self.choice = index
-        Gtk.main_quit()
+    def error(self, message, detail):
+        Gtk = self.Gtk
+        dialog = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING,
+                                   buttons=Gtk.ButtonsType.OK, text=message)
+        dialog.format_secondary_text(detail)
+        dialog.run()
+        dialog.destroy()
 
-    def on_copy(self, _button):
-        self.choice = "copy"
-        Gtk.main_quit()
+    def copy_text(self, text):
+        clipboard = self.Gtk.Clipboard.get(self.Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(text, -1)
+        clipboard.store()
 
-    def on_key(self, _widget, event, count):
-        if event.keyval == Gdk.KEY_Escape:
-            Gtk.main_quit()
-            return True
-        digit = event.keyval - Gdk.KEY_1
-        if 0 <= digit < min(count, 9):
-            self.choice = digit
-            Gtk.main_quit()
-            return True
-        return False
+
+class Gtk4Toolkit:
+    name = "gtk4"
+
+    @staticmethod
+    def available():
+        return "4.0" in gi_versions("Gtk")
+
+    def __init__(self):
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Gdk", "4.0")
+        from gi.repository import Gdk, GLib, Gtk, Pango
+        self.Gdk, self.GLib, self.Gtk, self.Pango = Gdk, GLib, Gtk, Pango
+
+    def pick(self, url, targets):
+        Gdk, Gtk, Pango = self.Gdk, self.Gtk, self.Pango
+        choice = Choice()
+        loop = self.GLib.MainLoop()  # GTK 4 has no Gtk.main()
+
+        def finish(value):
+            choice.value = value
+            loop.quit()
+
+        def on_key(_controller, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                loop.quit()
+                return True
+            index = keyval - Gdk.KEY_1
+            if 0 <= index < min(len(targets), 9):
+                finish(index)
+                return True
+            return False
+
+        window = Gtk.Window(title="ProfilePilot")
+        window.set_resizable(False)
+        window.connect("close-request", lambda *_: (loop.quit(), False)[1])
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", on_key)
+        window.add_controller(keys)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        for margin in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{margin}")(16)
+
+        title = Gtk.Label(xalign=0)
+        title.set_markup("<b>Open link with</b>" if url else "<b>Open browser</b>")
+        box.append(title)
+
+        if url:
+            url_label = Gtk.Label(label=url, xalign=0)
+            url_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            url_label.set_max_width_chars(48)
+            url_label.set_margin_bottom(6)
+            url_label.add_css_class("dim-label")
+            box.append(url_label)
+
+        first_button = None
+        for index, target in enumerate(targets):
+            button = Gtk.Button(label=target["title"])
+            button.get_child().set_xalign(0)
+            button.connect("clicked", lambda _b, i=index: finish(i))
+            box.append(button)
+            first_button = first_button or button
+
+        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bottom.set_margin_top(8)
+        if url:
+            copy_button = Gtk.Button(label="Copy Link")
+            copy_button.connect("clicked", lambda *_: finish("copy"))
+            bottom.append(copy_button)
+        cancel_button = Gtk.Button(label="Cancel")
+        cancel_button.connect("clicked", lambda *_: loop.quit())
+        cancel_button.set_hexpand(True)
+        cancel_button.set_halign(Gtk.Align.END)
+        bottom.append(cancel_button)
+        box.append(bottom)
+
+        window.set_child(box)
+        window.present()
+        if first_button:
+            first_button.grab_focus()
+        loop.run()
+        window.destroy()
+        return choice.value
+
+    def error(self, message, detail):
+        Gtk = self.Gtk
+        loop = self.GLib.MainLoop()
+        if hasattr(Gtk, "AlertDialog"):  # GTK 4.10+
+            dialog = Gtk.AlertDialog(message=message, detail=detail, modal=False)
+            dialog.choose(None, None, lambda *_: loop.quit())
+        else:
+            dialog = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING,
+                                       buttons=Gtk.ButtonsType.OK, text=message,
+                                       secondary_text=detail)
+            dialog.connect("response", lambda *_: loop.quit())
+            dialog.present()
+        loop.run()
+
+    def copy_text(self, text):
+        # No clipboard manager handoff in GTK 4: this only holds while we run,
+        # so it is a last resort behind wl-copy/xclip/xsel.
+        display = self.Gdk.Display.get_default()
+        if display:
+            display.get_clipboard().set(text)
+
+
+class QtToolkit:
+    name = "qt"
+
+    @staticmethod
+    def available():
+        return any(importlib.util.find_spec(binding) for binding in QT_BINDINGS)
+
+    def __init__(self):
+        for binding in QT_BINDINGS:
+            try:
+                self.core = importlib.import_module(f"{binding}.QtCore")
+                self.widgets = importlib.import_module(f"{binding}.QtWidgets")
+            except ImportError:
+                continue
+            self.binding = binding
+            break
+        else:
+            raise ImportError("no Qt binding (%s)" % "/".join(QT_BINDINGS))
+        self.name = f"qt ({self.binding})"
+        # Keep the QApplication alive for the process: Qt requires exactly one
+        # and destroying it invalidates every widget created under it.
+        self.app = (self.widgets.QApplication.instance()
+                    or self.widgets.QApplication(sys.argv[:1]))
+
+    @staticmethod
+    def key_code(key):
+        """PyQt6 hands out enum members, PyQt5/PySide plain ints."""
+        return int(getattr(key, "value", key))
+
+    def pick(self, url, targets):
+        Qt, widgets = self.core.Qt, self.widgets
+        choice = Choice()
+        escape, one = self.key_code(Qt.Key.Key_Escape), self.key_code(Qt.Key.Key_1)
+
+        class PickerDialog(widgets.QDialog):
+            def keyPressEvent(self, event):  # noqa: N802 (Qt naming)
+                key = QtToolkit.key_code(event.key())
+                if key == escape:
+                    self.reject()
+                    return
+                index = key - one
+                if 0 <= index < min(len(targets), 9):
+                    choice.value = index
+                    self.accept()
+                    return
+                super().keyPressEvent(event)
+
+        dialog = PickerDialog()
+        dialog.setWindowTitle("ProfilePilot")
+
+        def finish(value):
+            choice.value = value
+            dialog.accept()
+
+        layout = widgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+        layout.addWidget(widgets.QLabel(
+            "<b>Open link with</b>" if url else "<b>Open browser</b>"))
+
+        if url:
+            url_label = widgets.QLabel(middle_ellipsize(url))
+            url_label.setToolTip(url)
+            url_label.setEnabled(False)  # renders in the theme's dim colour
+            layout.addWidget(url_label)
+
+        first_button = None
+        for index, target in enumerate(targets):
+            button = widgets.QPushButton(target["title"])
+            button.setStyleSheet("text-align: left; padding: 5px 10px;")
+            button.clicked.connect(lambda *_, i=index: finish(i))
+            layout.addWidget(button)
+            first_button = first_button or button
+
+        bottom = widgets.QHBoxLayout()
+        if url:
+            copy_button = widgets.QPushButton("Copy Link")
+            copy_button.clicked.connect(lambda *_: finish("copy"))
+            bottom.addWidget(copy_button)
+        bottom.addStretch(1)
+        cancel_button = widgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(lambda *_: dialog.reject())
+        bottom.addWidget(cancel_button)
+        layout.addSpacing(8)
+        layout.addLayout(bottom)
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if first_button:
+            first_button.setFocus()
+        run = getattr(dialog, "exec", None) or dialog.exec_  # exec_ on PyQt5
+        run()
+        return choice.value
+
+    def error(self, message, detail):
+        # The static helper takes plain strings, so no enum juggling.
+        self.widgets.QMessageBox.warning(None, message, detail)
+
+    def copy_text(self, text):
+        # Like GTK 4, ownership ends with the process on X11; wl-copy/xclip
+        # are tried first for that reason.
+        self.app.clipboard().setText(text)
+        self.app.processEvents()
+
+
+TOOLKITS = (Gtk3Toolkit, Gtk4Toolkit, QtToolkit)
+QT_DESKTOPS = ("kde", "lxqt", "razor", "deepin", "trinity")
+
+
+_FORCED_ORDER = []  # set by --toolkit
+_TOOLKIT = ...  # loaded lazily; None once loading has failed
+
+
+def parse_order(value):
+    return [name.strip().lower() for name in value.split(",") if name.strip()]
+
+
+def toolkit_order():
+    """Preferred toolkit names, most wanted first. GTK 3 leads on GTK desktops
+    because it is the only one that can center the picker and keep it above
+    other windows on X11; Qt desktops get their own toolkit first so the
+    picker inherits the session theme."""
+    if _FORCED_ORDER:
+        return _FORCED_ORDER
+    forced = os.environ.get("PROFILEPILOT_TOOLKIT", "").strip()
+    if forced:
+        return parse_order(forced)
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    if any(name in desktop for name in QT_DESKTOPS):
+        return ["qt", "gtk3", "gtk4"]
+    return ["gtk3", "gtk4", "qt"]
+
+
+def load_toolkit():
+    """The first usable toolkit, or None (with a note on stderr) if the
+    machine has neither PyGObject nor a Qt binding. Cached: a run shows at
+    most one toolkit, and Qt in particular dislikes being set up twice."""
+    global _TOOLKIT
+    if _TOOLKIT is not ...:
+        return _TOOLKIT
+    by_name = {toolkit.name: toolkit for toolkit in TOOLKITS}
+    problems = []
+    for name in toolkit_order():
+        toolkit = by_name.get(name)
+        if toolkit is None:
+            problems.append(f"unknown toolkit {name!r}, expected one of "
+                            f"{', '.join(by_name)}")
+        elif toolkit.available():
+            try:
+                _TOOLKIT = toolkit()
+                return _TOOLKIT
+            except Exception as exc:  # installed but unusable (broken typelib…)
+                problems.append(f"{name}: {exc}")
+    for problem in problems:
+        print(f"profilepilot: {problem}", file=sys.stderr)
+    print(f"profilepilot: no usable UI toolkit found. {TOOLKIT_HINT}", file=sys.stderr)
+    _TOOLKIT = None
+    return None
 
 
 def error_dialog(message, detail):
-    dialog = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING,
-                               buttons=Gtk.ButtonsType.OK, text=message)
-    dialog.format_secondary_text(detail)
-    dialog.run()
-    dialog.destroy()
+    toolkit = load_toolkit()
+    if toolkit:
+        toolkit.error(message, detail)
+    else:
+        print(f"profilepilot: {message}: {detail}", file=sys.stderr)
 
 
 def route(url, targets, flags=()):
     if len(targets) == 1:
         open_target(targets[0], url, flags)
         return
-    picker = Picker(url, targets)
-    picker.show_all()
-    Gtk.main()
-    picker.destroy()
-    if picker.choice == "copy":
+    toolkit = load_toolkit()
+    if not toolkit:
+        # No picker is possible, but dropping the link is worse than opening
+        # the top target — the default browser, or the last one chosen.
+        open_target(targets[0], url, flags)
+        return
+    choice = toolkit.pick(url, targets)
+    if choice == "copy":
         copy_to_clipboard(url)
-    elif isinstance(picker.choice, int):
-        save_last_choice(targets[picker.choice]["title"])
-        open_target(targets[picker.choice], url, flags)
+    elif isinstance(choice, int):
+        save_last_choice(targets[choice]["title"])
+        open_target(targets[choice], url, flags)
 
 
 def generate_config(force=False):
@@ -416,8 +769,29 @@ def generate_config(force=False):
     return 0
 
 
+def take_toolkit_flag(args):
+    """Strip --toolkit NAME / --toolkit=NAME so it is never forwarded to a
+    browser, and make it the preferred order."""
+    global _FORCED_ORDER
+    rest = []
+    pending = False
+    for arg in args:
+        if pending:
+            _FORCED_ORDER = parse_order(arg)
+            pending = False
+        elif arg == "--toolkit":
+            pending = True
+        elif arg.startswith("--toolkit="):
+            _FORCED_ORDER = parse_order(arg.split("=", 1)[1])
+        else:
+            rest.append(arg)
+    if pending:
+        print("profilepilot: --toolkit needs a name (gtk3, gtk4 or qt)", file=sys.stderr)
+    return rest
+
+
 def main():
-    args = [a for a in sys.argv[1:] if a]
+    args = take_toolkit_flag(a for a in sys.argv[1:] if a)
     if args and args[0] in ("-h", "--help"):
         print(__doc__)
         return 0
@@ -432,6 +806,11 @@ def main():
         print(f"config: {config_path()}")
         for target in build_targets(config):
             print(f"  {target['title']}: {target['exe']} {' '.join(target['args'])}")
+        installed = [toolkit.name for toolkit in TOOLKITS if toolkit.available()]
+        toolkit = load_toolkit()
+        print(f"toolkit: {toolkit.name if toolkit else 'none'} "
+              f"(installed: {', '.join(installed) or 'none'}; "
+              f"preference: {', '.join(toolkit_order())})")
         return 0
 
     # Anything starting with "-" is a browser flag (--incognito, --private-window)

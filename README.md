@@ -9,10 +9,10 @@ shows the picker, hands the URL off, and quits.
 
 Two implementations share one config format:
 
-| platform | where                        | UI                        |
-| -------- | ---------------------------- | ------------------------- |
-| macOS    | [`macos/`](macos/)           | AppKit (Swift)            |
-| Linux    | [`linux/`](linux/)           | GTK 3 (Python, PyGObject) |
+| platform | where              | UI                                    |
+| -------- | ------------------ | ------------------------------------- |
+| macOS    | [`macos/`](macos/) | AppKit (Swift)                        |
+| Linux    | [`linux/`](linux/) | GTK 3 / GTK 4 / Qt (Python, detected) |
 
 ## Features
 
@@ -64,8 +64,23 @@ is pre-seeded with every browser found on the machine.
 
 ## Linux
 
-Requires Python 3, PyGObject (GTK 3), and `xdg-utils` — all standard on most
-distros (Arch: `python-gobject gtk3 xdg-utils`).
+Requires Python 3, `xdg-utils`, and one UI toolkit — whichever the machine
+already has:
+
+| toolkit | package (Arch)   | package (Debian/Ubuntu)         |
+| ------- | ---------------- | ------------------------------- |
+| GTK 3   | `python-gobject gtk3` | `python3-gi gir1.2-gtk-3.0` |
+| GTK 4   | `python-gobject gtk4` | `python3-gi gir1.2-gtk-4.0` |
+| Qt      | `python-pyqt6`   | `python3-pyqt6` (or PySide6/PyQt5) |
+
+Nothing is imported until a picker is actually needed, so the toolkit is
+detected at run time rather than pinned at install time. GTK 3 is preferred
+when present (only it can center the picker and keep it above other windows
+on X11), then GTK 4, then Qt — except on KDE/LXQt/Deepin, where Qt goes first
+so the picker follows the session theme. Override with `--toolkit gtk4` or
+`PROFILEPILOT_TOOLKIT=qt,gtk4` (a comma-separated preference order).
+With no toolkit at all, links still open — in the top target, without a
+picker.
 
 ```fish
 ./linux/install.fish
@@ -82,7 +97,8 @@ the profiles it found for each so you can see what the picker will show. It
 refuses to clobber an existing config unless you pass `--force`.
 
 The other options: `profilepilot --list` prints the resolved picker entries
-and `profilepilot --register` re-registers it as the default browser. Called
+plus the toolkit it would use, and `profilepilot --register` re-registers it
+as the default browser. Called
 with no URL it shows the picker and opens a new window in the chosen browser,
 and any argument starting with `-` (e.g. `--incognito`) is forwarded to the
 browser rather than treated as a URL — desktop launchers invoke the default
@@ -145,6 +161,9 @@ cp /tmp/AppIcon.iconset/icon_256x256.png linux/profilepilot.png
   running" complaint.
 - The Linux app is functional but young — Flatpak/Snap browser paths aren't
   auto-detected yet (point `localState`/`profilesIni` at them manually).
+- Linux **Copy Link** hands off to `wl-copy`/`xclip`/`xsel` when one is
+  installed; without them the copy only survives the picker's exit on GTK 3,
+  since GTK 4 and Qt have no clipboard-manager handoff.
 
 ## Roadmap
 
