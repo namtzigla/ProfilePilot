@@ -73,13 +73,20 @@ distros (Arch: `python-gobject gtk3 xdg-utils`).
 
 This installs `profilepilot` to `~/.local/bin`, a desktop entry + icon to
 `~/.local/share`, and registers it as the default browser via `xdg-settings`.
-`profilepilot --list` prints the resolved picker entries and
-`profilepilot --register` re-registers it as default. Called with no URL it
-shows the picker and opens a new window in the chosen browser, and any
-argument starting with `-` (e.g. `--incognito`) is forwarded to the browser
-rather than treated as a URL — desktop launchers invoke the default browser
-both ways. There is no settings GUI on Linux yet — edit the JSON config
-(below). With no config, browsers are auto-detected each run.
+With no config, browsers are auto-detected each run.
+
+There is no settings GUI on Linux yet, so the config file (below) is edited by
+hand — but `profilepilot --generate-config` writes a starting point for you.
+It scans for installed browsers, writes them to the config file, and prints
+the profiles it found for each so you can see what the picker will show. It
+refuses to clobber an existing config unless you pass `--force`.
+
+The other options: `profilepilot --list` prints the resolved picker entries
+and `profilepilot --register` re-registers it as the default browser. Called
+with no URL it shows the picker and opens a new window in the chosen browser,
+and any argument starting with `-` (e.g. `--incognito`) is forwarded to the
+browser rather than treated as a URL — desktop launchers invoke the default
+browser both ways.
 
 ## Configuration file
 

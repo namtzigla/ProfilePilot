@@ -10,6 +10,9 @@ Usage: profilepilot [browser flags] [url ...]
   --incognito are forwarded to it unchanged.
   --list       print the resolved picker entries and exit
   --register   register as the default browser and exit
+  --generate-config [--force]
+               scan for installed browsers and profiles and write them to
+               the config file (--force overwrites an existing one)
 
 Config entry keys (all optional except "app"):
   app         executable name ("google-chrome-stable", "firefox") or full path
@@ -100,7 +103,8 @@ def last_choice_path():
     return os.path.join(base, "profilepilot", "last-choice")
 
 
-def starter_entries():
+def detected_entries():
+    """Config entries for every known browser installed, [] if none are."""
     entries, seen = [], set()
     for exe in KNOWN_EXECUTABLES:
         path = shutil.which(exe)
@@ -114,7 +118,11 @@ def starter_entries():
         if exe in SHORT_NAMES:
             entry["name"] = SHORT_NAMES[exe]
         entries.append(entry)
-    return entries or DEFAULT_CONFIG["browsers"]
+    return entries
+
+
+def starter_entries():
+    return detected_entries() or DEFAULT_CONFIG["browsers"]
 
 
 def load_config():
@@ -380,6 +388,34 @@ def route(url, targets, flags=()):
         open_target(targets[picker.choice], url, flags)
 
 
+def generate_config(force=False):
+    """Write a config listing every installed browser, then report what the
+    picker will show for it — including the profiles found for each."""
+    path = config_path()
+    if os.path.exists(path) and not force:
+        print(f"{path} already exists — pass --force to overwrite it.")
+        return 1
+    entries = detected_entries()
+    if not entries:
+        print("No known browsers found; nothing written.", file=sys.stderr)
+        return 1
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"browsers": entries}, f, indent=2)
+        f.write("\n")
+
+    print(f"wrote {path}")
+    for entry in entries:
+        print(f"  {entry.get('name', entry['app'])} ({entry['app']})")
+        for target in targets_for(entry):
+            print(f"    - {target['title']}")
+    print('\nProfiles are re-read at every launch, so ones you add later show up\n'
+          'on their own. Edit the file to reorder or rename entries, mark one\n'
+          '"default": true, or hide one with "enabled": false.')
+    return 0
+
+
 def main():
     args = [a for a in sys.argv[1:] if a]
     if args and args[0] in ("-h", "--help"):
@@ -389,6 +425,8 @@ def main():
         subprocess.run(["xdg-settings", "set", "default-web-browser", "profilepilot.desktop"],
                        check=False)
         return 0
+    if args and args[0] == "--generate-config":
+        return generate_config(force="--force" in args)
     if args and args[0] == "--list":
         config, _ = load_config()
         print(f"config: {config_path()}")
