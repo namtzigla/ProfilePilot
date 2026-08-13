@@ -5,6 +5,12 @@ Registers as the default browser (see install.fish) and shows a GTK picker
 for each URL, then hands the URL to the chosen browser/profile. Shares its
 config format with the macOS app: ~/.config/profilepilot/config.json
 
+Usage: profilepilot [browser flags] [url ...]
+  with no url, opens a new window in the chosen browser; flags such as
+  --incognito are forwarded to it unchanged.
+  --list       print the resolved picker entries and exit
+  --register   register as the default browser and exit
+
 Config entry keys (all optional except "app"):
   app         executable name ("google-chrome-stable", "firefox") or full path
   name        display name in the picker
@@ -27,6 +33,9 @@ import sys
 import gi
 
 gi.require_version("Gtk", "3.0")
+# Pin Gdk too: on systems with GTK 4 installed alongside GTK 3, importing Gdk
+# unversioned resolves to 4.0 and then conflicts with Gtk 3.0's own Gdk 3.0.
+gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gtk, Pango  # noqa: E402
 
 CHROMIUM_CONFIG_DIRS = {
@@ -262,8 +271,11 @@ def save_last_choice(title):
         f.write(title)
 
 
-def open_target(target, url):
-    subprocess.Popen([target["exe"]] + target["args"] + [url],
+def open_target(target, url, flags=()):
+    command = [target["exe"]] + target["args"] + list(flags)
+    if url:
+        command.append(url)
+    subprocess.Popen(command,
                      start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -295,14 +307,15 @@ class Picker(Gtk.Window):
         box.set_property("margin", 16)
 
         title = Gtk.Label(xalign=0)
-        title.set_markup("<b>Open link with</b>")
+        title.set_markup("<b>Open link with</b>" if url else "<b>Open browser</b>")
         box.pack_start(title, False, False, 0)
 
-        url_label = Gtk.Label(label=url, xalign=0)
-        url_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        url_label.set_max_width_chars(48)
-        url_label.get_style_context().add_class("dim-label")
-        box.pack_start(url_label, False, False, 6)
+        if url:
+            url_label = Gtk.Label(label=url, xalign=0)
+            url_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            url_label.set_max_width_chars(48)
+            url_label.get_style_context().add_class("dim-label")
+            box.pack_start(url_label, False, False, 6)
 
         for index, target in enumerate(targets):
             button = Gtk.Button(label=target["title"])
@@ -313,11 +326,12 @@ class Picker(Gtk.Window):
                 button.grab_focus()
 
         bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        copy_button = Gtk.Button(label="Copy Link")
-        copy_button.connect("clicked", self.on_copy)
         cancel_button = Gtk.Button(label="Cancel")
         cancel_button.connect("clicked", lambda *_: Gtk.main_quit())
-        bottom.pack_start(copy_button, False, False, 0)
+        if url:
+            copy_button = Gtk.Button(label="Copy Link")
+            copy_button.connect("clicked", self.on_copy)
+            bottom.pack_start(copy_button, False, False, 0)
         bottom.pack_end(cancel_button, False, False, 0)
         box.pack_start(bottom, False, False, 8)
 
@@ -351,9 +365,9 @@ def error_dialog(message, detail):
     dialog.destroy()
 
 
-def route(url, targets):
+def route(url, targets, flags=()):
     if len(targets) == 1:
-        open_target(targets[0], url)
+        open_target(targets[0], url, flags)
         return
     picker = Picker(url, targets)
     picker.show_all()
@@ -363,7 +377,7 @@ def route(url, targets):
         copy_to_clipboard(url)
     elif isinstance(picker.choice, int):
         save_last_choice(targets[picker.choice]["title"])
-        open_target(targets[picker.choice], url)
+        open_target(targets[picker.choice], url, flags)
 
 
 def main():
@@ -375,13 +389,18 @@ def main():
         subprocess.run(["xdg-settings", "set", "default-web-browser", "profilepilot.desktop"],
                        check=False)
         return 0
-    if not args:
+    if args and args[0] == "--list":
         config, _ = load_config()
         print(f"config: {config_path()}")
         for target in build_targets(config):
             print(f"  {target['title']}: {target['exe']} {' '.join(target['args'])}")
-        print("usage: profilepilot <url>   (or --register to become the default browser)")
         return 0
+
+    # Anything starting with "-" is a browser flag (--incognito, --private-window)
+    # to forward, not a URL. Desktop launchers invoke the default browser this
+    # way — with flags only, or with no arguments at all to open a new window.
+    flags = [a for a in args if a.startswith("-")]
+    urls = [a for a in args if not a.startswith("-")]
 
     config, error = load_config()
     if error:
@@ -394,8 +413,8 @@ def main():
         return 1
     if not has_default_browser(config):
         targets = promote_last_choice(targets)
-    for url in args:
-        route(url, targets)
+    for url in urls or [None]:
+        route(url, targets, flags)
     return 0
 
 
