@@ -62,6 +62,22 @@ any installed http handler or `.app`, reorder arrows, **Set as Default
 Browser**, and **Edit JSON…** for the advanced keys. On first run the table
 is pre-seeded with every browser found on the machine.
 
+### File access permission (macOS 15+ / macOS 27)
+
+Recent macOS versions block apps from reading other apps' data folders until
+you allow it. ProfilePilot reads Chrome's `Local State`, Firefox's
+`profiles.ini`, etc. from `~/Library/Application Support/`, so without this
+permission the picker shows only a single entry per browser and no profiles.
+
+To fix it, open **System Settings → Privacy & Security → Files & Folders**,
+find **ProfilePilot**, and enable access for **Google Chrome**, **Firefox**,
+and any other browser whose profiles you want listed. If macOS asked when
+ProfilePilot first tried to read a folder and you clicked *Don't Allow*, the
+switch will be off here — flip it on. Alternatively, grant ProfilePilot
+**Full Disk Access** in the same Privacy & Security pane, which covers every
+browser (and Safari's `SafariTabs.db`) at once. Click a link again after
+changing the setting; no relaunch or rebuild is needed.
+
 ## Linux
 
 Requires Python 3, `xdg-utils`, and one UI toolkit — whichever the machine
