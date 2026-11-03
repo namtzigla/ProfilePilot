@@ -129,11 +129,55 @@ func appleScriptString(_ value: String) -> String {
         .replacingOccurrences(of: "\"", with: "\\\"") + "\""
 }
 
-// Safari has no CLI or scripting interface for profiles, so the profile
-// window is opened by clicking Safari's File > "New <Profile> Window" menu
-// item via System Events (this needs Accessibility + Automation permission),
-// then pointing the new front window at the URL.
+// Safari titles every window "<Profile> — <Page>", so a window that already
+// belongs to the profile can be found by name through Safari's own
+// scripting interface (no Accessibility needed). Returns the frontmost
+// matching window's id.
+func safariWindowID(forProfile profileName: String) -> Int32? {
+    let script = """
+    tell application "Safari"
+        set out to {}
+        repeat with w in windows
+            set end of out to {id of w, name of w}
+        end repeat
+        return out
+    end tell
+    """
+    var error: NSDictionary?
+    guard let list = NSAppleScript(source: script)?.executeAndReturnError(&error), error == nil,
+          list.numberOfItems > 0 else { return nil }
+    let prefix = profileName + " — "
+    for index in 1...list.numberOfItems {
+        guard let item = list.atIndex(index), item.numberOfItems == 2,
+              let name = item.atIndex(2)?.stringValue, name.hasPrefix(prefix),
+              let id = item.atIndex(1)?.int32Value else { continue }
+        return id
+    }
+    return nil
+}
+
+// Safari has no CLI or scripting interface for profiles. A window of the
+// profile that is already open gets the URL as a new tab. Otherwise the
+// profile window is opened by clicking Safari's File > "New <Profile> Window"
+// menu item via System Events (this needs Accessibility + Automation
+// permission), then pointing the new front window at the URL.
 func openInSafariProfile(_ profileName: String, appPath: String, url: URL) {
+    var error: NSDictionary?
+    if let windowID = safariWindowID(forProfile: profileName) {
+        let script = """
+        tell application "Safari"
+            set w to window id \(windowID)
+            set miniaturized of w to false
+            tell w to make new tab at end of tabs with properties {URL:\(appleScriptString(url.absoluteString))}
+            set current tab of w to last tab of w
+            set index of w to 1
+            activate
+        end tell
+        """
+        NSAppleScript(source: script)?.executeAndReturnError(&error)
+        if error == nil { return }
+        error = nil
+    }
     guard AXIsProcessTrusted() else {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
@@ -175,7 +219,6 @@ func openInSafariProfile(_ profileName: String, appPath: String, url: URL) {
         end repeat
     end tell
     """
-    var error: NSDictionary?
     NSAppleScript(source: script)?.executeAndReturnError(&error)
     if error != nil {
         runOpen(["-a", appPath, url.absoluteString])

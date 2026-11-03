@@ -26,12 +26,13 @@ Two implementations share one config format:
     profile manager (`StoreID=` in `profiles.ini`) the user-visible names are
     read from `Profile Groups/<storeid>.sqlite` and launched with
     `--profile <path>`. The last-used/default profile sorts first.
-  - Safari (macOS only): profiles are enumerated from `SafariTabs.db`;
-    opening clicks Safari's `File → New <Profile> Window` menu item via
-    System Events and then sets the new window's URL. Needs **Automation**
-    and **Accessibility** permissions on first use, plus access to Safari's
-    data for the profile list. Without them, Safari falls back to a single
-    entry / last-used profile.
+  - Safari (macOS only): profiles are enumerated from `SafariTabs.db`. If a
+    window of the profile is already open, the link opens as a new tab in
+    it; otherwise opening clicks Safari's `File → New <Profile> Window` menu
+    item via System Events and then sets the new window's URL. Needs
+    **Automation** permission, **Accessibility** for the new-window case,
+    and **Full Disk Access** for the profile list. Without them, Safari
+    falls back to a single entry / last-used profile.
 - **Enable/disable and a default browser.** Each entry can be switched off
   without deleting it, and one browser can be marked as the default: its
   entries sort first so `Return`/`Enter` opens it.
