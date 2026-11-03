@@ -18,13 +18,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.runModal()
         }
         // An explicit default browser owns the top spot; otherwise the last
-        // picked target is promoted so Return repeats it.
+        // picked target is promoted so Return repeats it. Either way, a
+        // target remembered for the link's site takes over the top spot.
         var targets = buildTargets(config)
         if !hasDefaultBrowser(config) {
             targets = promoteLastChoice(targets)
         }
         for url in urls {
-            route(url, targets: targets)
+            route(url, targets: promoteHistoryMatch(targets, url: url))
         }
         NSApp.terminate(nil)
     }
@@ -55,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch Picker().run(url: url, targets: targets) {
         case .open(let index):
             UserDefaults.standard.set(targets[index].title, forKey: lastChoiceKey)
+            recordHistory(url: url, title: targets[index].title)
             openTarget(targets[index], url: url)
         case .copy:
             let pasteboard = NSPasteboard.general

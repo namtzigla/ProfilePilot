@@ -12,6 +12,7 @@
 		403F48113A9C3934DE36FF63 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B29505BE106B9A76D26E443C /* AppDelegate.swift */; };
 		4A2320681B20AB09F64B01AA /* Browsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59D371E5BFC9A41E57E94527 /* Browsers.swift */; };
 		75057FE7F99965D619BBC8C4 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21EF1B23AED068C030FB28AF /* Config.swift */; };
+		A4CA94984979355698E1A72B /* History.swift in Sources */ = {isa = PBXBuildFile; fileRef = A051CCE76A13451DA21A32A5 /* History.swift */; };
 		C13F1D1FBD07E1540F3648DE /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03BA6D102BDF6EAA0A3C2062 /* main.swift */; };
 		C83D21C07FB0C7B7B8ADDCF7 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED0D8D0273369916A7E5448E /* Settings.swift */; };
 		E89F3F59A659D7D3ED326EF7 /* Picker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 826DDC63AD456AEB129000BE /* Picker.swift */; };
@@ -24,6 +25,7 @@
 		59D371E5BFC9A41E57E94527 /* Browsers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Browsers.swift; sourceTree = "<group>"; };
 		79C5DDDED8E43C886FBB77E9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		826DDC63AD456AEB129000BE /* Picker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Picker.swift; sourceTree = "<group>"; };
+		A051CCE76A13451DA21A32A5 /* History.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = History.swift; sourceTree = "<group>"; };
 		B29505BE106B9A76D26E443C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		ED0D8D0273369916A7E5448E /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
 		F1A52475078ACC46BF79F2AB /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
@@ -62,6 +64,7 @@
 				B29505BE106B9A76D26E443C /* AppDelegate.swift */,
 				59D371E5BFC9A41E57E94527 /* Browsers.swift */,
 				21EF1B23AED068C030FB28AF /* Config.swift */,
+				A051CCE76A13451DA21A32A5 /* History.swift */,
 				79C5DDDED8E43C886FBB77E9 /* Info.plist */,
 				03BA6D102BDF6EAA0A3C2062 /* main.swift */,
 				826DDC63AD456AEB129000BE /* Picker.swift */,
@@ -144,6 +147,7 @@
 				403F48113A9C3934DE36FF63 /* AppDelegate.swift in Sources */,
 				4A2320681B20AB09F64B01AA /* Browsers.swift in Sources */,
 				75057FE7F99965D619BBC8C4 /* Config.swift in Sources */,
+				A4CA94984979355698E1A72B /* History.swift in Sources */,
 				E89F3F59A659D7D3ED326EF7 /* Picker.swift in Sources */,
 				C83D21C07FB0C7B7B8ADDCF7 /* Settings.swift in Sources */,
 				1C4262F2EE1CFFCD9F98027C /* Targets.swift in Sources */,

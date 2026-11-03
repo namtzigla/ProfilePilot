@@ -35,9 +35,16 @@ Two implementations share one config format:
 - **Enable/disable and a default browser.** Each entry can be switched off
   without deleting it, and one browser can be marked as the default: its
   entries sort first so `Return`/`Enter` opens it.
-- **Keyboard-first picker.** `Return` opens the top entry — the default
-  browser if one is set, otherwise the entry you picked last time — `2`–`9`
-  jump to the others, `Esc` cancels. Plus a **Copy Link** button.
+- **Keyboard-first picker.** `Return` opens the top entry — the one you
+  used for this site last time, else the default browser if one is set, else
+  the entry you picked last time — `2`–`9` jump to the others, `Esc` cancels.
+  Plus a **Copy Link** button.
+- **Remembers where each site goes.** Every pick is stored against the link's
+  host and path. The next link to that site comes up with the same
+  browser/profile on top, already highlighted. Matching is fuzzy and the
+  longest match wins: `github.com/work-org/…` can go to a work profile while
+  the rest of `github.com` goes to a personal one, and `gist.github.com`
+  falls back to whatever `github.com` used.
 - If only one target exists, the picker is skipped and the URL opens directly.
 
 ## macOS
@@ -153,9 +160,32 @@ Each entry supports:
 | `enabled`     | `false` hides the browser from the picker without deleting the entry.      |
 | `default`     | `true` marks the default browser (at most one entry).                      |
 
-Picker order follows config order, with two exceptions: the default browser's
-entries always sort first, and when no default is set the entry you chose last
-time moves to the top. Profiles sort last-used/default first.
+Picker order follows config order, with three exceptions: the default browser's
+entries always sort first, when no default is set the entry you chose last
+time moves to the top, and the entry remembered for the link's site beats
+both. Profiles sort last-used/default first.
+
+### Site history
+
+Picks are remembered in `~/.local/state/profilepilot/history.json` (or under
+`$XDG_STATE_HOME`), on both platforms in the same format:
+
+```json
+{
+  "github.com/namtzigla/profilepilot": { "title": "Chrome — Personal", "used": 1762183215 },
+  "github.com/work-org":               { "title": "Chrome — Work",     "used": 1762183300 }
+}
+```
+
+The key is the link's host and path, lowercased, without scheme, port, query,
+fragment or a leading `www.`. A link matches a stored key when at least two
+host labels line up from the right (`gist.github.com` matches `github.com`;
+single-label hosts such as `localhost` must match in full); once the whole
+host matches, each leading path segment that also matches extends the match.
+The longest match wins, ties go to the most recent pick, and entries whose
+browser/profile is no longer in the picker are ignored. The file keeps the
+1000 most recent entries; delete it to forget everything, or remove single
+lines to forget one site.
 
 ## Icon
 

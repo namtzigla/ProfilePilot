@@ -5,6 +5,10 @@ Registers as the default browser (see install.sh) and shows a picker for
 each URL, then hands the URL to the chosen browser/profile. Shares its config
 format with the macOS app: ~/.config/profilepilot/config.json
 
+Every pick is remembered against the link's site in
+~/.local/state/profilepilot/history.json (same format as on macOS), and the
+next link to that site comes up with the same browser/profile on top.
+
 The picker draws itself with whichever toolkit the machine has — GTK 3, GTK 4
 or Qt (PyQt6/PySide6/PyQt5) — so there is nothing to install on most desktops.
 With none of them, links still open in the top target, just without a picker.
@@ -40,6 +44,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
+from urllib.parse import urlsplit
 
 CHROMIUM_CONFIG_DIRS = {
     "google-chrome": "google-chrome",
@@ -101,6 +107,11 @@ def config_path():
 def last_choice_path():
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     return os.path.join(base, "profilepilot", "last-choice")
+
+
+def history_path():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "profilepilot", "history.json")
 
 
 def detected_entries():
@@ -277,6 +288,131 @@ def save_last_choice(title):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(title)
+
+
+# Per-site history: every pick is remembered against the URL it opened, so
+# the next link to the same site (or the same part of it) comes up with that
+# browser/profile already on top of the picker. Same file format as the macOS
+# app:
+#
+#   {"github.com/namtzigla/profilepilot": {"title": "Chrome — Personal",
+#                                          "used": 1762183215}, ...}
+#
+# Lookup is fuzzy: a stored key matches when at least two host labels line up
+# from the right (gist.github.com matches github.com), and once the host
+# matches in full, leading path segments add to the match. The longest match
+# wins; ties go to the most recently used entry.
+
+HISTORY_LIMIT = 1000
+
+
+def load_history():
+    try:
+        with open(history_path()) as f:
+            history = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {key: entry for key, entry in history.items()
+            if isinstance(entry, dict) and isinstance(entry.get("title"), str)}
+
+
+def save_history(history):
+    path = history_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(history, f, indent=2, sort_keys=True, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def history_key(url):
+    """"https://www.GitHub.com:443/Namtzigla/ProfilePilot/?tab=x#y"
+    -> "github.com/namtzigla/profilepilot". Scheme, port, query, fragment, a
+    leading "www." and letter case are all dropped so that variations of the
+    same link land on the same key. URLs without a host (file:, mailto:) are
+    not remembered."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return None
+    if not host:
+        return None
+    if host.startswith("www.") and len(host) > 4:
+        host = host[4:]
+    segments = [seg for seg in parts.path.lower().split("/") if seg]
+    return host + "/" + "/".join(segments) if segments else host
+
+
+def _split_key(key):
+    host, _, path = key.partition("/")
+    return host.split("."), [seg for seg in path.split("/") if seg]
+
+
+def history_match_score(stored, key):
+    """Number of characters of `key` that `stored` matches, 0 for no match."""
+    stored_host, stored_path = _split_key(stored)
+    key_host, key_path = _split_key(key)
+    labels = score = 0
+    for x, y in zip(reversed(stored_host), reversed(key_host)):
+        if x != y:
+            break
+        labels += 1
+        score += len(x)
+    # Two labels are the least that identify a site; single-label hosts
+    # (localhost, intranet names) must match in full.
+    required = min(2, len(stored_host), len(key_host))
+    if labels < required or labels == 0:
+        return 0
+    score += labels - 1  # the dots
+    if labels != len(stored_host) or labels != len(key_host):
+        return score
+    for x, y in zip(stored_path, key_path):
+        if x != y:
+            break
+        score += len(x) + 1  # the slash
+    return score
+
+
+def history_match(url, titles, history):
+    """The title remembered for the closest stored key, if it is in titles."""
+    key = history_key(url) if url else None
+    if not key:
+        return None
+    best = None
+    for stored, entry in history.items():
+        if entry["title"] not in titles:
+            continue
+        score = history_match_score(stored, key)
+        if score <= 0:
+            continue
+        rank = (score, entry.get("used", 0))
+        if best is None or rank > best[0]:
+            best = (rank, entry["title"])
+    return best[1] if best else None
+
+
+def promote_history_match(targets, url):
+    """Moves the target remembered for this URL's site to the top of the
+    picker, where it is focused and Enter opens it."""
+    title = history_match(url, [t["title"] for t in targets], load_history())
+    for index, target in enumerate(targets):
+        if target["title"] == title and index > 0:
+            return [target] + targets[:index] + targets[index + 1:]
+    return targets
+
+
+def record_history(url, title):
+    key = history_key(url) if url else None
+    if not key:
+        return
+    history = load_history()
+    history[key] = {"title": title, "used": int(time.time())}
+    if len(history) > HISTORY_LIMIT:
+        oldest = sorted(history, key=lambda k: history[k].get("used", 0))
+        for key in oldest[:len(history) - HISTORY_LIMIT]:
+            del history[key]
+    save_history(history)
 
 
 def open_target(target, url, flags=()):
@@ -724,6 +860,7 @@ def error_dialog(message, detail):
 
 
 def route(url, targets, flags=()):
+    targets = promote_history_match(targets, url)
     if len(targets) == 1:
         open_target(targets[0], url, flags)
         return
@@ -738,6 +875,7 @@ def route(url, targets, flags=()):
         copy_to_clipboard(url)
     elif isinstance(choice, int):
         save_last_choice(targets[choice]["title"])
+        record_history(url, targets[choice]["title"])
         open_target(targets[choice], url, flags)
 
 
